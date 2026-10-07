@@ -14,9 +14,6 @@
 name: Vibernt bench
 
 on:
-  push:
-    branches: [bench]
-    paths: ['.github/workflows/vibernt-bench.yml']
   workflow_dispatch:
     inputs:
       runner:

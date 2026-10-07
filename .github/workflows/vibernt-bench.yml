@@ -1,0 +1,219 @@
+# Vibernt runner benchmark (v045-b5). Manual dispatch only.
+#
+# Copies the steps of upstream jobs at this commit, unchanged except:
+#   - runs-on is the `runner` input (GitHub-hosted baseline or a Vibernt drop-in label);
+#   - the `github.repository == 'mastra-ai/mastra'` gates, `needs:` on the change-detection/prebuild jobs and the
+#     reusable-workflow inputs are removed (full run: every shard, fixed store list);
+#   - no secrets: TURBO_TOKEN/TURBO_TEAM and the cloud-store keys are dropped. TURBO_CACHE takes the value the upstream
+#     expression yields without a token (local:rw), and remote:r where upstream hard-codes it;
+#   - cache=cold puts a per-run tag into the pnpm store cache key (via cache-dependency-path) and the .turbo/cache key
+#     and restore prefix so nothing restores; cache=warm uses a constant tag (pnpm store) and upstream's exact turbo
+#     key and restore prefix.
+# Jobs: test-suite.yml `UNIT Test (Shard 1-4)`, prebuild.yml `Memory Tests`, test-combined-stores.yml `test (store)` for
+# seven docker-compose stores that need no cloud credentials.
+name: Vibernt bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label
+        type: choice
+        options:
+          - ubuntu-24.04
+          - vibernt-ubuntu-24.04-4cpu
+          - vibernt-ubuntu-24.04
+        default: ubuntu-24.04
+      cache:
+        description: cold = cache keys that never match; warm = upstream cache keys
+        type: choice
+        options:
+          - cold
+          - warm
+        default: warm
+
+run-name: bench ${{ inputs.runner }} ${{ inputs.cache }}
+
+permissions: {}
+
+env:
+  BENCH_CACHE_TAG: ${{ inputs.cache == 'cold' && format('cold-{0}-{1}-', github.run_id, github.run_attempt) || '' }}
+
+jobs:
+  unit-test:
+    name: UNIT Test (Shard ${{ matrix.shard }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      TURBO_CACHE: local:rw
+      NODE_OPTIONS: --max-old-space-size=8192
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+        with:
+          fetch-depth: 2
+
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+
+      - name: Cache turbo build setup
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}
+
+      - name: Build packages
+        run: pnpm turbo build --filter "!./examples/**/*" --filter "!./docs/" --filter "!./explorations/**/*"
+
+      - name: Run changed tests (Shard ${{ matrix.shard }}/4)
+        run: |
+          pnpm vitest run \
+            --project 'unit:*' --project 'typecheck:*' \
+            --reporter=blob \
+            --reporter=verbose \
+            --reporter=github-actions \
+            --outputFile.blob=.vitest-reports/blob-unit-${{ matrix.shard }}.json \
+            --shard=${{ matrix.shard }}/4 \
+            --passWithNoTests
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: vitest-blob-unit-${{ matrix.shard }}
+          path: .vitest-reports/
+          include-hidden-files: true
+          retention-days: 1
+
+  memory-test:
+    name: Memory Tests
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mastra
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+
+    env:
+      TURBO_CACHE: remote:r
+
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+
+      - name: Cache turbo build setup
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}
+
+      - name: Build dependencies
+        run: pnpm turbo build --filter "./stores/libsql" --filter "./stores/pg" --filter "./stores/upstash" --filter "mastra" --filter "@mastra/memory" --filter "@mastra/fastembed" --filter "@internal/llm-recorder" --filter "@internal/test-utils"
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+
+      - name: Install integration test dependencies
+        run: pnpm install
+        working-directory: packages/memory/integration-tests
+
+      - name: Run Memory tests
+        run: pnpm vitest run
+        working-directory: packages/memory/integration-tests
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+          DB_URL: 'postgresql://postgres:postgres@localhost:5432/mastra'
+
+  store-test:
+    name: test (${{ matrix.store }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [clickhouse, mongodb, pg, mysql, qdrant, chroma, redis]
+    env:
+      TURBO_CACHE: remote:r
+
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+        with:
+          persist-credentials: false
+
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+
+      - name: Build combined storage packages
+        run: pnpm turbo --filter "@mastra/${{ matrix.store }}" build
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+
+      - name: Run ${{ matrix.store }} tests
+        run: pnpm test
+        working-directory: stores/${{ matrix.store }}
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'

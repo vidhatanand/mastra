@@ -2,7 +2,7 @@ name: Vibernt CI shard (benchmark copy)
 description: Split a job's test files across matrix legs (a fixed split by recorded duration, or fan-out where legs pull work from the run's queue), authenticated with the job's GitHub OIDC token.
 inputs:
   index:
-    description: This leg's shard (1-based), for example ${{ matrix.shard }}. Fixed and pull modes.
+    description: "This leg's shard (1-based), for example the matrix value shard. Fixed and pull modes. Benchmark copy - the published text has a matrix expression here, which the runner refuses when it loads the manifest."
     required: false
   total:
     description: The number of shards (2 to 16). Fixed mode.

@@ -1,4 +1,4 @@
-# Vibernt fan-out benchmark. Manual dispatch only (the push trigger only registers the workflow; its jobs are skipped).
+# Vibernt fan-out benchmark. Manual dispatch only.
 #
 # The UNIT tests of upstream's 4-shard vitest matrix (test-suite.yml: projects unit:* and typecheck:*) and the Memory
 # tests (prebuild.yml), with Vibernt CI fan-out instead of a fixed matrix:
@@ -12,9 +12,6 @@
 name: Vibernt fan-out
 
 on:
-  push:
-    branches: [bench]
-    paths: ['.github/workflows/vibernt-fanout.yml']
   workflow_dispatch:
     inputs:
       runner:

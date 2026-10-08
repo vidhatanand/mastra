@@ -1,0 +1,42 @@
+# Temporary (removed in the next commit): lists the test files of the Vibernt fan-out benchmark jobs with vitest itself,
+# so the fan-out plan gets exactly the files upstream's `UNIT Test` matrix runs. GitHub-hosted, no secrets.
+name: Vibernt list (temporary)
+
+on:
+  push:
+    branches: [bench]
+    paths: ['.github/workflows/vibernt-list.yml']
+
+permissions: {}
+
+jobs:
+  list:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+      - uses: ./.github/actions/setup-pnpm-node
+        with:
+          package-manager-cache: 'false'
+      - name: List unit and typecheck test files
+        run: |
+          mkdir -p .vibernt-list
+          if ! pnpm vitest list --filesOnly --json=.vibernt-list/unit.json --project 'unit:*' --project 'typecheck:*' > .vibernt-list/unit.log 2>&1; then
+            tail -50 .vibernt-list/unit.log
+            echo "listing without a build failed; building first"
+            pnpm turbo build --filter "!./examples/**/*" --filter "!./docs/" --filter "!./explorations/**/*" > .vibernt-list/build.log 2>&1 || tail -50 .vibernt-list/build.log
+            pnpm vitest list --filesOnly --json=.vibernt-list/unit.json --project 'unit:*' --project 'typecheck:*' > .vibernt-list/unit.log 2>&1 || tail -80 .vibernt-list/unit.log
+          fi
+          node -e "const j=require('./.vibernt-list/unit.json');const p=require('path');const s=new Set(j.map(x=>p.relative(process.cwd(),x.file)));console.log(j.length,'entries',s.size,'files');require('fs').writeFileSync('.vibernt-list/unit.files',[...s].sort().join('\n')+'\n')"
+          head -3 .vibernt-list/unit.json | cut -c1-400
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: vibernt-list
+          path: .vibernt-list/
+          include-hidden-files: true
+          retention-days: 3

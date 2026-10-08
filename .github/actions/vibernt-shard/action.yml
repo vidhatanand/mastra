@@ -1,0 +1,71 @@
+name: Vibernt CI shard (benchmark copy)
+description: Split a job's test files across matrix legs (a fixed split by recorded duration, or fan-out where legs pull work from the run's queue), authenticated with the job's GitHub OIDC token.
+inputs:
+  index:
+    description: This leg's shard (1-based), for example ${{ matrix.shard }}. Fixed and pull modes.
+    required: false
+  total:
+    description: The number of shards (2 to 16). Fixed mode.
+    required: false
+  pattern:
+    description: Glob(s) of the job's test files, newline-separated; {a,b} alternatives are expanded. Defaults to common test file names.
+    required: false
+  files-from:
+    description: Benchmark copy. A file listing the job's test files, one repository path per line (instead of pattern).
+    required: false
+  batch:
+    description: Benchmark copy. Pull mode, the most units one claim takes; a batch runs in one invocation of run (1 = one unit per claim).
+    default: '1'
+  job:
+    description: The job's name in test history, the same on every leg; use the same value in vibernt/report.
+    required: false
+  mode:
+    description: fixed (a fixed shard count), plan (a fan-out plan job that outputs the matrix) or pull (a fan-out leg that pulls its work from the run's queue).
+    default: fixed
+  max:
+    description: Plan mode, the most legs the plan may use (1 to 50, default 16).
+    required: false
+  target:
+    description: Plan mode, the wall time the plan aims for, for example 5m.
+    required: false
+  fail-fast:
+    description: Plan mode, pull_request to stop the remaining work on a pull request's first real failure, or never.
+    required: false
+  run:
+    description: Pull mode, the test command run for each claimed unit; {files} is replaced by the unit's test files (also in VIBERNT_FILES).
+    required: false
+  junit:
+    description: Pull mode, the JUnit report(s) the command writes (glob), uploaded for each unit.
+    default: junit.xml
+  project:
+    description: Vibernt CI project id, only needed when several projects are bound to this repository.
+    required: false
+  fail-on-error:
+    description: Fail the step when the plan is unavailable, instead of running every file.
+    default: 'false'
+  api-url:
+    description: Vibernt CI API origin.
+    default: https://ci.vibernt.ai
+  audience:
+    description: OIDC audience. Defaults to the API host.
+    required: false
+outputs:
+  files:
+    description: Space-separated test files of this leg.
+  files-json:
+    description: The same files as a JSON array.
+  count:
+    description: Number of files of this leg.
+  basis:
+    description: timing, mixed, file-count, or unavailable (every file).
+  digest:
+    description: The digest of the run's shard plan.
+  matrix:
+    description: Plan mode, the legs as a JSON list for strategy.matrix (for example [1,2,3]).
+  shards:
+    description: Plan mode, the number of legs.
+  units:
+    description: Pull mode, the units this leg ran.
+runs:
+  using: node20
+  main: index.mjs

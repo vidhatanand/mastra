@@ -1,0 +1,216 @@
+# Vibernt fan-out benchmark. Manual dispatch only (the push trigger only registers the workflow; its jobs are skipped).
+#
+# The UNIT tests of upstream's 4-shard vitest matrix (test-suite.yml: projects unit:* and typecheck:*) and the Memory
+# tests (prebuild.yml), with Vibernt CI fan-out instead of a fixed matrix:
+#   - `plan` lists the job's test files (.github/vibernt/*.files, listed with `vitest list` at this commit) and records
+#     the run's fan-out plan with the job's OIDC token; it outputs the matrix (how many legs);
+#   - each leg does upstream's setup unchanged (checkout, pnpm install from the warm store cache, turbo build, services),
+#     then pulls batches of test files from the run's queue and runs each batch in ONE vitest invocation, uploading
+#     each unit's JUnit results; a leg that starts late finds less work.
+# Setup steps and cache keys are the bench workflow's warm ones (vibernt-bench.yml); no secrets, no upstream changes.
+# The fan-out action is a local copy of cri-ci actions/shard (.github/actions/vibernt-shard, see its header).
+name: Vibernt fan-out
+
+on:
+  push:
+    branches: [bench]
+    paths: ['.github/workflows/vibernt-fanout.yml']
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label of the legs
+        type: choice
+        options:
+          - vibernt-ubuntu-24.04-4cpu
+          - vibernt-ubuntu-24.04
+          - ubuntu-24.04
+        default: vibernt-ubuntu-24.04-4cpu
+      plan-runner:
+        description: runs-on label of the plan job
+        type: choice
+        options:
+          - vibernt-ubuntu-24.04
+          - vibernt-ubuntu-24.04-4cpu
+          - ubuntu-24.04
+        default: vibernt-ubuntu-24.04
+
+run-name: fanout ${{ inputs.runner }}
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Fan-out plan
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ inputs.plan-runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      unit: ${{ steps.unit.outputs.matrix }}
+      memory: ${{ steps.memory.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        with:
+          persist-credentials: false
+      - id: unit
+        name: Plan UNIT tests
+        uses: ./.github/actions/vibernt-shard
+        with:
+          mode: plan
+          job: unit
+          files-from: .github/vibernt/unit.files
+          max: 12
+          target: 6m
+          fail-on-error: true
+      - id: memory
+        name: Plan Memory tests
+        uses: ./.github/actions/vibernt-shard
+        with:
+          mode: plan
+          job: memory
+          files-from: .github/vibernt/memory.files
+          max: 4
+          target: 3m
+          fail-on-error: true
+
+  unit-test:
+    name: UNIT fan-out (leg ${{ matrix.shard }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: plan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.unit) }}
+    env:
+      TURBO_CACHE: local:rw
+      NODE_OPTIONS: --max-old-space-size=8192
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+        with:
+          fetch-depth: 2
+
+      - name: Bench cache key
+        run: echo "warm" > .bench-cache-key
+
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+
+      - name: Cache turbo build setup
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
+
+      - name: Build packages
+        run: pnpm turbo build --filter "!./examples/**/*" --filter "!./docs/" --filter "!./explorations/**/*"
+
+      - name: Run tests (fan-out leg ${{ matrix.shard }})
+        uses: ./.github/actions/vibernt-shard
+        with:
+          mode: pull
+          job: unit
+          index: ${{ matrix.shard }}
+          batch: 48
+          run: pnpm vitest run --project 'unit:*' --project 'typecheck:*' --reporter=default --reporter=junit --outputFile.junit=.vibernt/junit.xml --passWithNoTests {files}
+          junit: .vibernt/junit.xml
+
+  memory-test:
+    name: Memory fan-out (leg ${{ matrix.shard }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: plan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.memory) }}
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mastra
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+
+    env:
+      TURBO_CACHE: remote:r
+
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+
+      - name: Bench cache key
+        run: echo "warm" > .bench-cache-key
+
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+
+      - name: Cache turbo build setup
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
+
+      - name: Build dependencies
+        run: pnpm turbo build --filter "./stores/libsql" --filter "./stores/pg" --filter "./stores/upstash" --filter "mastra" --filter "@mastra/memory" --filter "@mastra/fastembed" --filter "@internal/llm-recorder" --filter "@internal/test-utils"
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+
+      - name: Install integration test dependencies
+        run: pnpm install
+        working-directory: packages/memory/integration-tests
+
+      - name: Run Memory tests (fan-out leg ${{ matrix.shard }})
+        uses: ./.github/actions/vibernt-shard
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+          DB_URL: 'postgresql://postgres:postgres@localhost:5432/mastra'
+        with:
+          mode: pull
+          job: memory
+          index: ${{ matrix.shard }}
+          batch: 48
+          run: bash .github/vibernt/run-vitest.sh {files}
+          junit: .vibernt-junit/*.xml

@@ -224,7 +224,9 @@ async function pull(job) {
     let failed = 0, units = 0, won = 0, batches = 0;
     try {
         for (;;) {
+            const claimAt = Date.now();
             const answer = await queuePost(grant, 'claim', batchMax > 1 ? { batch: batchMax } : {});
+            const claimMs = Date.now() - claimAt;
             if (answer.stop || answer.done)
                 break;
             if (answer.wait) {
@@ -239,6 +241,7 @@ async function pull(job) {
             for (const path of listFiles(report))
                 rmSync(path, { force: true });
             const files = batch.flatMap(u => u.files);
+            info(`Claim answered in ${claimMs} ms.`);
             info(`Batch ${batches}: ${batch.length} unit(s) [${batch.map(u => u.id).join(',')}]${batch.some(u => u.speculative) ? ' (speculative copy)' : ''}, ${files.length} file(s), estimated ${Math.round(batch.reduce((n, u) => n + (u.estMs || 0), 0) / 1000)} s.`);
             const started = Date.now();
             // Benchmark copy: `unit-timeout-floor-ms` raises the queue's unit timeout (2 minutes for a file with no recorded
@@ -265,6 +268,7 @@ async function pull(job) {
             // A failed run that names no failing test (a crash, a missing or broken report) fails every unit of the batch.
             const unexplained = !ran.stopped && !ran.timedOut && (code !== 0 || unreadable || !found) && !cases.some(c => c.status === 'failed');
             info(`Batch ${batches} done in ${Math.round(wall / 1000)} s: exit ${code}, ${cases.length} case(s), ${cases.filter(c => c.status === 'failed').length} failed${unexplained ? ' (failure without a failing test: every unit fails)' : ''}.`);
+            const postAt = Date.now();
             for (const u of batch) {
                 const mine = byUnit.get(u.id) || [];
                 const status = ran.stopped || cancelled.has(u.lease) ? 'cancelled' : ran.timedOut ? 'timeout' : unexplained || mine.some(c => c.status === 'failed') ? 'failed' : 'passed';
@@ -281,6 +285,7 @@ async function pull(job) {
                     }
                 }
             }
+            info(`Batch ${batches}: ${batch.length} result(s) posted in ${Date.now() - postAt} ms.`);
         }
     }
     finally {

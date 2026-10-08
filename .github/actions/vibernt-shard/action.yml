@@ -16,6 +16,9 @@ inputs:
   batch:
     description: Benchmark copy. Pull mode, the most units one claim takes; a batch runs in one invocation of run (1 = one unit per claim).
     default: '1'
+  unit-timeout-floor-ms:
+    description: Benchmark copy. Pull mode, the least time in milliseconds a claimed batch may run before it is stopped (0 = the queue's unit timeout).
+    default: '0'
   job:
     description: The job's name in test history, the same on every leg; use the same value in vibernt/report.
     required: false

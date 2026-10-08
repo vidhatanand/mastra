@@ -126,6 +126,7 @@ jobs:
           job: unit
           index: ${{ matrix.shard }}
           batch: 48
+          unit-timeout-floor-ms: 1500000
           run: pnpm vitest run --project 'unit:*' --project 'typecheck:*' --reporter=default --reporter=junit --outputFile.junit=.vibernt/junit.xml --passWithNoTests {files}
           junit: .vibernt/junit.xml
 
@@ -209,5 +210,6 @@ jobs:
           job: memory
           index: ${{ matrix.shard }}
           batch: 48
+          unit-timeout-floor-ms: 1500000
           run: bash .github/vibernt/run-vitest.sh {files}
           junit: .vibernt-junit/*.xml

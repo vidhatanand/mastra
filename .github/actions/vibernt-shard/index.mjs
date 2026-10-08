@@ -25,7 +25,9 @@ import { junitCases } from '../lib/junit.mjs';
 //    a 4,000-path `pattern` input exceeds the 128 KiB limit of one environment variable;
 //  - `batch` (pull mode): claims up to that many units at once (the queue's batched claim, as the native runner does) and
 //    runs them in ONE invocation of `run`, then attributes each JUnit case to the unit whose file names it and posts each
-//    unit's result with its cases (`batch: 1` is the published behaviour: one unit per claim, the XML posted as is).
+//    unit's result with its cases (`batch: 1` is the published behaviour: one unit per claim, the XML posted as is);
+//  - queue calls are retried on a network error or a 5xx (4 attempts, as the native runner's QueueClient);
+//  - `unit-timeout-floor-ms` (pull mode): the least time a batch may run before it is stopped as a timeout.
 
 const DEFAULT_PATTERN = ['**/*.test.{js,mjs,cjs,ts,mts,tsx,jsx}', '**/*.spec.{js,mjs,cjs,ts,mts,tsx,jsx}', '**/test_*.py', '**/*_test.py', '**/*_test.go'].join('\n');
 const MODES = ['fixed', 'plan', 'pull'];
@@ -239,7 +241,9 @@ async function pull(job) {
             const files = batch.flatMap(u => u.files);
             info(`Batch ${batches}: ${batch.length} unit(s) [${batch.map(u => u.id).join(',')}]${batch.some(u => u.speculative) ? ' (speculative copy)' : ''}, ${files.length} file(s), estimated ${Math.round(batch.reduce((n, u) => n + (u.estMs || 0), 0) / 1000)} s.`);
             const started = Date.now();
-            const budget = Math.max(Math.max(...batch.map(u => u.timeoutMs || 1800000)), 3 * batch.reduce((n, u) => n + (u.estMs || 0), 0));
+            // Benchmark copy: `unit-timeout-floor-ms` raises the queue's unit timeout (2 minutes for a file with no recorded
+            // duration, which killed every adapter integration file on the first run and so never recorded one).
+            const budget = Math.max(Math.max(...batch.map(u => u.timeoutMs || 1800000)), 3 * batch.reduce((n, u) => n + (u.estMs || 0), 0), Number(input('unit-timeout-floor-ms', '0')) || 0);
             const ran = await runUnit(command, files, () => stopped || batch.every(u => cancelled.has(u.lease)), budget);
             const wall = Date.now() - started;
             for (const u of batch)

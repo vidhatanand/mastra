@@ -12,7 +12,8 @@
 #     the turbo build only when nothing was restored, and pulls batches of test files from the run's queue (shard mode
 #     pull).
 # deps runs with HOME=/tmp/vibernt-deps-home (a copy of ~/.npmrc) and the pnpm store directory pinned: the action's
-# side-effect check walks HOME, which holds the workspace and the runner's logs. cache=cold tags the pnpm store and turbo
+# side-effect check walks HOME, which holds the workspace and the runner's logs. pnpm's metadata cache (in that HOME) is
+# kept with actions/cache so the offline verify passes Mastra's supply-chain policy. cache=cold tags the pnpm store and turbo
 # cache keys as in vibernt-bench.yml; a cold run is dispatched on a fresh bench-* branch so the remote build cache and
 # deps (scoped per branch) are cold too. No secrets, no upstream workflow changes.
 name: Vibernt bench fan-out
@@ -107,6 +108,12 @@ jobs:
           echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: pnpm metadata cache for the offline verify
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
+
       - name: Install dependencies (vibernt/deps)
         id: deps
         uses: vibernt/ci/actions/deps@v1
@@ -182,6 +189,12 @@ jobs:
           echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: pnpm metadata cache for the offline verify
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
+
       - name: Install dependencies (vibernt/deps)
         id: deps
         uses: vibernt/ci/actions/deps@v1
@@ -270,6 +283,12 @@ jobs:
           echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: pnpm metadata cache for the offline verify
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
+
       - name: Install dependencies (vibernt/deps)
         id: deps
         uses: vibernt/ci/actions/deps@v1

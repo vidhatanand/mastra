@@ -17,7 +17,9 @@
 #     the workspace and the runner's logs. HUSKY=0 for the root `prepare: husky`. UNIT shards use
 #     TURBO_CACHE=local:rw,remote:rw (upstream's value with a token) so turbo uses the runner's remote cache (Vibernt
 #     drop-in sets TURBO_API/TOKEN/TEAM in the runner's .env; the workflow sets none); Memory and store jobs keep
-#     upstream's remote:r. id-token: write for the Vibernt actions.
+#     upstream's remote:r. id-token: write for the Vibernt actions. pnpm's metadata cache (in that HOME) is kept with
+#     actions/cache: Mastra's supply-chain policy (minimumReleaseAge, trustPolicy) needs package metadata, so without it
+#     the deps action's offline verify fails (ERR_PNPM_NO_OFFLINE_META) and every restore falls back to a full install.
 # Jobs: test-suite.yml `UNIT Test (Shard 1-4)`, prebuild.yml `Memory Tests`, test-combined-stores.yml `test (store)` for
 # seven docker-compose stores that need no cloud credentials.
 name: Vibernt bench
@@ -100,6 +102,13 @@ jobs:
           echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+
+      - name: pnpm metadata cache for the offline verify (levers)
+        if: inputs.levers == 'all'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Install dependencies (vibernt/deps, levers)
         id: deps
@@ -199,6 +208,13 @@ jobs:
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
 
+      - name: pnpm metadata cache for the offline verify (levers)
+        if: inputs.levers == 'all'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
+
       - name: Install dependencies (vibernt/deps, levers)
         id: deps
         if: inputs.levers == 'all'
@@ -275,6 +291,13 @@ jobs:
           echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
           mkdir -p /tmp/vibernt-deps-home
           if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+
+      - name: pnpm metadata cache for the offline verify (levers)
+        if: inputs.levers == 'all'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /tmp/vibernt-deps-home/.cache/pnpm
+          key: pnpm-meta-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Install dependencies (vibernt/deps, levers)
         id: deps

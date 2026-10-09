@@ -9,6 +9,15 @@
 #   - cache=cold puts a per-run tag into the pnpm store cache key (via cache-dependency-path) and the .turbo/cache key
 #     and restore prefix so nothing restores; cache=warm uses a constant tag (pnpm store) and upstream's exact turbo
 #     key and restore prefix.
+#   - levers=all (0.4.5 lever round): setup-pnpm-node runs without its install and the install goes through
+#     vibernt/ci/actions/deps@v1 (installed node_modules by exact install identity, verified offline). Mastra uses pnpm's
+#     global virtual store, so node_modules are links into the pnpm store (restored by setup-pnpm-node's own store
+#     cache); the deps step pins the store directory and runs with HOME=/tmp/vibernt-deps-home (a copy of the runner's
+#     ~/.npmrc, so the dependency store still applies) because the action's side-effect check walks HOME, which holds
+#     the workspace and the runner's logs. HUSKY=0 for the root `prepare: husky`. UNIT shards use
+#     TURBO_CACHE=local:rw,remote:rw (upstream's value with a token) so turbo uses the runner's remote cache (Vibernt
+#     drop-in sets TURBO_API/TOKEN/TEAM in the runner's .env; the workflow sets none); Memory and store jobs keep
+#     upstream's remote:r. id-token: write for the Vibernt actions.
 # Jobs: test-suite.yml `UNIT Test (Shard 1-4)`, prebuild.yml `Memory Tests`, test-combined-stores.yml `test (store)` for
 # seven docker-compose stores that need no cloud credentials.
 name: Vibernt bench
@@ -31,8 +40,15 @@ on:
           - cold
           - warm
         default: warm
+      levers:
+        description: none = upstream setup; all = vibernt/ci deps around the install and turbo's remote cache in UNIT shards
+        type: choice
+        options:
+          - none
+          - all
+        default: none
 
-run-name: bench ${{ inputs.runner }} ${{ inputs.cache }}
+run-name: bench ${{ inputs.runner }} ${{ inputs.cache }} levers=${{ inputs.levers || 'none' }}
 
 permissions: {}
 
@@ -50,10 +66,11 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     env:
-      TURBO_CACHE: local:rw
+      TURBO_CACHE: ${{ inputs.levers == 'all' && 'local:rw,remote:rw' || 'local:rw' }}
       NODE_OPTIONS: --max-old-space-size=8192
     permissions:
       contents: read
+      id-token: write
 
     steps:
       - name: Checkout repo
@@ -68,12 +85,31 @@ jobs:
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
         with:
+          install-dependencies: ${{ inputs.levers == 'all' && 'false' || 'true' }}
           cache-dependency-path: |
             pnpm-lock.yaml
             .bench-cache-key
 
       - name: Remove bench cache key
         run: rm -f .bench-cache-key
+
+      - name: Store directory and deps home (levers)
+        if: inputs.levers == 'all'
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+
+      - name: Install dependencies (vibernt/deps, levers)
+        id: deps
+        if: inputs.levers == 'all'
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
 
       - name: Cache turbo build setup
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -112,6 +148,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
+      id-token: write
     timeout-minutes: 30
     services:
       postgres:
@@ -146,12 +183,31 @@ jobs:
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
         with:
+          install-dependencies: ${{ inputs.levers == 'all' && 'false' || 'true' }}
           cache-dependency-path: |
             pnpm-lock.yaml
             .bench-cache-key
 
       - name: Remove bench cache key
         run: rm -f .bench-cache-key
+
+      - name: Store directory and deps home (levers)
+        if: inputs.levers == 'all'
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+
+      - name: Install dependencies (vibernt/deps, levers)
+        id: deps
+        if: inputs.levers == 'all'
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
 
       - name: Cache turbo build setup
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -184,6 +240,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -203,12 +260,31 @@ jobs:
       - name: Setup pnpm and Node.js
         uses: ./.github/actions/setup-pnpm-node
         with:
+          install-dependencies: ${{ inputs.levers == 'all' && 'false' || 'true' }}
           cache-dependency-path: |
             pnpm-lock.yaml
             .bench-cache-key
 
       - name: Remove bench cache key
         run: rm -f .bench-cache-key
+
+      - name: Store directory and deps home (levers)
+        if: inputs.levers == 'all'
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+
+      - name: Install dependencies (vibernt/deps, levers)
+        id: deps
+        if: inputs.levers == 'all'
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
 
       - name: Build combined storage packages
         run: pnpm turbo --filter "@mastra/${{ matrix.store }}" build

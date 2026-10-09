@@ -1,0 +1,303 @@
+# Vibernt build-once fan-out benchmark (0.4.5 lever round). Manual dispatch only.
+#
+# The UNIT tests (projects unit:* and typecheck:*, upstream's 4-shard matrix) and the Memory tests of vibernt-bench.yml as
+# fan-out with build once, through the published vibernt/ci actions (v1):
+#   - `plan` plans both jobs (shard mode plan, files from .github/vibernt/*.files), then does the setup once: pnpm/Node
+#     with the pnpm store cache, vibernt/ci deps (installed node_modules by install identity), the turbo build of every
+#     package the UNIT shards build (a superset of what Memory builds; turbo's remote cache from the runner), and uploads
+#     the prepared workspace for each job (shard mode prepare). node_modules are left out of the copy: Mastra uses pnpm's
+#     global virtual store, so they are links into the pnpm store outside the workspace, which the copy never holds;
+#     each leg restores them with deps over its own store cache.
+#   - each leg checks out, restores the prepared workspace (shard mode restore), sets up pnpm/Node and node_modules, runs
+#     the turbo build only when nothing was restored, and pulls batches of test files from the run's queue (shard mode
+#     pull).
+# deps runs with HOME=/tmp/vibernt-deps-home (a copy of ~/.npmrc) and the pnpm store directory pinned: the action's
+# side-effect check walks HOME, which holds the workspace and the runner's logs. cache=cold tags the pnpm store and turbo
+# cache keys as in vibernt-bench.yml; a cold run is dispatched on a fresh bench-* branch so the remote build cache and
+# deps (scoped per branch) are cold too. No secrets, no upstream workflow changes.
+name: Vibernt bench fan-out
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label of the plan job and the legs
+        type: choice
+        options:
+          - vibernt-ubuntu-24.04-4cpu
+          - vibernt-ubuntu-24.04
+          - ubuntu-24.04
+        default: vibernt-ubuntu-24.04-4cpu
+      cache:
+        description: cold = cache keys that never match; warm = the bench workflow's warm keys
+        type: choice
+        options:
+          - cold
+          - warm
+        default: warm
+
+run-name: fanout build-once ${{ inputs.runner }} ${{ inputs.cache }}
+
+permissions: {}
+
+env:
+  BENCH_CACHE_TAG: ${{ inputs.cache == 'cold' && format('cold-{0}-{1}-', github.run_id, github.run_attempt) || '' }}
+  COPY_EXCLUDE: '**/node_modules'
+
+jobs:
+  plan:
+    name: Fan-out plan and prepare
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      unit: ${{ steps.unit.outputs.matrix }}
+      memory: ${{ steps.memory.outputs.matrix }}
+    env:
+      TURBO_CACHE: local:rw,remote:rw
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        with:
+          persist-credentials: false
+      - id: unit
+        name: Plan UNIT tests
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: plan
+          job: unit
+          files-from: .github/vibernt/unit.files
+          max: 12
+          target: 6m
+          timeout: 40m
+          fail-on-error: true
+      - id: memory
+        name: Plan Memory tests
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: plan
+          job: memory
+          files-from: .github/vibernt/memory.files
+          max: 4
+          target: 3m
+          timeout: 40m
+          fail-on-error: true
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          install-dependencies: 'false'
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+      - name: Store directory and deps home
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: Install dependencies (vibernt/deps)
+        id: deps
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+      - name: Cache turbo build setup
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}
+      - name: Build packages
+        run: pnpm turbo build --filter "!./examples/**/*" --filter "!./docs/" --filter "!./explorations/**/*"
+      - name: Prepare workspace (unit)
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: prepare
+          job: unit
+          exclude: ${{ env.COPY_EXCLUDE }}
+      - name: Prepare workspace (memory)
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: prepare
+          job: memory
+          exclude: ${{ env.COPY_EXCLUDE }}
+
+  unit-test:
+    name: UNIT fan-out (leg ${{ matrix.shard }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: plan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.unit) }}
+    env:
+      TURBO_CACHE: local:rw,remote:rw
+      NODE_OPTIONS: --max-old-space-size=8192
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+        with:
+          fetch-depth: 2
+      - id: ws
+        name: Restore prepared workspace
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: restore
+          job: unit
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          install-dependencies: 'false'
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+      - name: Store directory and deps home
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: Install dependencies (vibernt/deps)
+        id: deps
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+      - name: Cache turbo build setup (only without a prepared workspace)
+        if: steps.ws.outputs.restored != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}
+      - name: Build packages (only without a prepared workspace)
+        if: steps.ws.outputs.restored != 'true'
+        run: pnpm turbo build --filter "!./examples/**/*" --filter "!./docs/" --filter "!./explorations/**/*"
+      - name: Run tests (fan-out leg ${{ matrix.shard }})
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: pull
+          job: unit
+          index: ${{ matrix.shard }}
+          batch: 48
+          run: pnpm vitest run --project 'unit:*' --project 'typecheck:*' --reporter=default --reporter=junit --outputFile.junit=.vibernt/junit.xml --passWithNoTests {files}
+          junit: .vibernt/junit.xml
+
+  memory-test:
+    name: Memory fan-out (leg ${{ matrix.shard }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: plan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.memory) }}
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mastra
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+    env:
+      TURBO_CACHE: remote:r
+    steps:
+      - uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+        timeout-minutes: 20
+      - id: ws
+        name: Restore prepared workspace
+        uses: vibernt/ci/actions/shard@v1
+        with:
+          mode: restore
+          job: memory
+      - name: Bench cache key
+        run: echo "${BENCH_CACHE_TAG:-warm}" > .bench-cache-key
+      - name: Setup pnpm and Node.js
+        uses: ./.github/actions/setup-pnpm-node
+        with:
+          install-dependencies: 'false'
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .bench-cache-key
+      - name: Remove bench cache key
+        run: rm -f .bench-cache-key
+      - name: Store directory and deps home
+        run: |
+          store=$(pnpm store path --silent)
+          echo "DEPS_STORE_DIR=${store%/v[0-9]*}" >> "$GITHUB_ENV"
+          mkdir -p /tmp/vibernt-deps-home
+          if [[ -f "$HOME/.npmrc" ]]; then cp "$HOME/.npmrc" /tmp/vibernt-deps-home/.npmrc; fi
+      - name: Install dependencies (vibernt/deps)
+        id: deps
+        uses: vibernt/ci/actions/deps@v1
+        env:
+          HUSKY: '0'
+          HOME: /tmp/vibernt-deps-home
+          npm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+          pnpm_config_store_dir: ${{ env.DEPS_STORE_DIR }}
+      - name: Cache turbo build setup (only without a prepared workspace)
+        if: steps.ws.outputs.restored != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ env.BENCH_CACHE_TAG }}
+      - name: Build dependencies (only without a prepared workspace)
+        if: steps.ws.outputs.restored != 'true'
+        run: pnpm turbo build --filter "./stores/libsql" --filter "./stores/pg" --filter "./stores/upstash" --filter "mastra" --filter "@mastra/memory" --filter "@mastra/fastembed" --filter "@internal/llm-recorder" --filter "@internal/test-utils"
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+      - name: Install integration test dependencies
+        run: pnpm install
+        working-directory: packages/memory/integration-tests
+      - name: Run Memory tests (fan-out leg ${{ matrix.shard }})
+        uses: vibernt/ci/actions/shard@v1
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+          DB_URL: 'postgresql://postgres:postgres@localhost:5432/mastra'
+        with:
+          mode: pull
+          job: memory
+          index: ${{ matrix.shard }}
+          batch: 48
+          run: bash .github/vibernt/run-vitest.sh {files}
+          junit: .vibernt-junit/*.xml

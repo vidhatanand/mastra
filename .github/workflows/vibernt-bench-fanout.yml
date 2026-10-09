@@ -18,6 +18,11 @@
 name: Vibernt bench fan-out
 
 on:
+  # A push to a bench-register-* branch only registers this workflow with GitHub (a workflow_dispatch-only file outside
+  # the default branch cannot be dispatched until it has run once); every job is skipped on push.
+  push:
+    branches:
+      - 'bench-register-*'
   workflow_dispatch:
     inputs:
       runner:
